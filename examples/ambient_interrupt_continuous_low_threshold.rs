@@ -18,10 +18,10 @@ mod app {
         ),
     >;
 
-    type Vl6180xType = vl6180x::VL6180X<vl6180x::ReadyMode, I2cType>;
+    type Vl6180xType = vl6180x::VL6180X<vl6180x::AmbientContinuousMode, I2cType>;
 
     type Tof1Type = vl6180x::VL6180XwPins<
-        vl6180x::ReadyMode,
+        vl6180x::AmbientContinuousMode,
         I2cType,
         hal::gpio::gpiob::PB7<hal::gpio::Output>,
         hal::gpio::gpiob::PB6<hal::gpio::Input>,
@@ -30,7 +30,6 @@ mod app {
     #[shared]
     struct Shared {
         led: hal::gpio::gpioc::PC13<hal::gpio::Output<hal::gpio::PushPull>>,
-        delay: hal::timer::SysDelay,
         tof_1: Tof1Type,
     }
 
@@ -43,7 +42,7 @@ mod app {
         let cp = ctx.core;
         let rcc = dp.RCC.constrain();
         let clocks = rcc.cfgr.sysclk(48.MHz()).freeze();
-        let delay = cp.SYST.delay(&clocks);
+        let mut delay = cp.SYST.delay(&clocks);
         let mut exti = dp.EXTI;
         let mut syscfg = dp.SYSCFG.constrain();
 
@@ -70,21 +69,31 @@ mod app {
         let mut x_shutdown_pin = gpiob.pb7.into_push_pull_output();
         x_shutdown_pin.set_high();
 
-        let mut tof_config = vl6180x::Config::new();
-        tof_config.set_range_interrupt_mode(vl6180x::RangeInterruptMode::NewSampleReady);
-        let vl6180x: Vl6180xType = vl6180x::VL6180X::with_config(i2c, &tof_config).expect("vl");
+        // Ensure vl6180x is booted before trying to communicate with it
+        delay.delay_ms(2_u8);
 
         let mut interrupt_pin = gpiob.pb6.into_pull_up_input();
         interrupt_pin.make_interrupt_source(&mut syscfg);
         interrupt_pin.trigger_on_edge(&mut exti, hal::gpio::Edge::Rising);
         interrupt_pin.enable_interrupt(&mut exti);
+
+        let mut tof_config = vl6180x::Config::new();
+        tof_config.set_ambient_interrupt_mode(vl6180x::AmbientInterruptMode::LevelLow);
+        tof_config.set_ambient_low_interrupt_threshold(40);
+        tof_config.set_ambient_analogue_gain_level(7).expect("saag");
+        tof_config.set_ambient_result_scaler(15).expect("sas");
+        let vl6180x: Vl6180xType = vl6180x::VL6180X::with_config(i2c, &tof_config)
+            .expect("vl")
+            .start_ambient_continuous_mode()
+            .expect("ct");
+
         let tof_1: Tof1Type = vl6180x::VL6180XwPins {
             vl6180x,
             x_shutdown_pin,
             interrupt_pin,
         };
 
-        (Shared { led, delay, tof_1 }, Local {}, init::Monotonics())
+        (Shared { led, tof_1 }, Local {}, init::Monotonics())
     }
 
     #[task(binds=EXTI9_5, shared = [led, tof_1])]
@@ -95,35 +104,18 @@ mod app {
         hprintln!("-------- Interrupt! --------").unwrap();
         (led, tof_1).lock(|led, tof_1| {
             led.set_low();
-            match tof_1.vl6180x.read_range_mm() {
-                Ok(range) => hprintln!("Range Read: {}mm", range).unwrap(),
+            match tof_1.vl6180x.read_ambient() {
+                Ok(raw) => hprintln!("Ambient Read: {}", raw).unwrap(),
                 Err(e) => hprintln!("Error {:?}", e).unwrap(),
             };
+            led.set_high();
             tof_1.interrupt_pin.clear_interrupt_pending_bit();
-            led.set_high()
+            tof_1.vl6180x.clear_all_interrupts().expect("clrall");
         });
     }
 
-    #[idle(shared= [led, delay, tof_1])]
-    fn idle(ctx: idle::Context) -> ! {
-        let mut delay = ctx.shared.delay;
-        let mut led = ctx.shared.led;
-        let mut tof_1 = ctx.shared.tof_1;
-
-        let ms = 3000_u16;
-        loop {
-            hprintln!("Start Reading!").unwrap();
-            tof_1.lock(|tof_1| {
-                tof_1.vl6180x.start_range_single().expect("srs");
-            });
-            led.lock(|led| {
-                led.set_low();
-            });
-            delay.lock(|delay| delay.delay_ms(50_u8));
-            led.lock(|led| {
-                led.set_high();
-            });
-            delay.lock(|delay| delay.delay_ms(ms));
-        }
+    #[idle()]
+    fn idle(_ctx: idle::Context) -> ! {
+        loop {}
     }
 }

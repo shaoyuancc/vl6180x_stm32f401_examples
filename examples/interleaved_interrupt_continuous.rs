@@ -18,10 +18,10 @@ mod app {
         ),
     >;
 
-    type Vl6180xType = vl6180x::VL6180X<vl6180x::RangeContinuousMode, I2cType>;
+    type Vl6180xType = vl6180x::VL6180X<vl6180x::InterleavedContinuousMode, I2cType>;
 
     type Tof1Type = vl6180x::VL6180XwPins<
-        vl6180x::RangeContinuousMode,
+        vl6180x::InterleavedContinuousMode,
         I2cType,
         hal::gpio::gpiob::PB7<hal::gpio::Output>,
         hal::gpio::gpiob::PB6<hal::gpio::Input>,
@@ -30,12 +30,13 @@ mod app {
     #[shared]
     struct Shared {
         led: hal::gpio::gpioc::PC13<hal::gpio::Output<hal::gpio::PushPull>>,
-        delay: hal::timer::SysDelay,
         tof_1: Tof1Type,
     }
 
     #[local]
-    struct Local {}
+    struct Local {
+        counter: u32,
+    }
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
@@ -43,7 +44,7 @@ mod app {
         let cp = ctx.core;
         let rcc = dp.RCC.constrain();
         let clocks = rcc.cfgr.sysclk(48.MHz()).freeze();
-        let delay = cp.SYST.delay(&clocks);
+        let mut delay = cp.SYST.delay(&clocks);
         let mut exti = dp.EXTI;
         let mut syscfg = dp.SYSCFG.constrain();
 
@@ -70,6 +71,9 @@ mod app {
         let mut x_shutdown_pin = gpiob.pb7.into_push_pull_output();
         x_shutdown_pin.set_high();
 
+        // Ensure vl6180x is booted before trying to communicate with it
+        delay.delay_ms(2_u8);
+
         let mut interrupt_pin = gpiob.pb6.into_pull_up_input();
         interrupt_pin.make_interrupt_source(&mut syscfg);
         interrupt_pin.trigger_on_edge(&mut exti, hal::gpio::Edge::Rising);
@@ -77,12 +81,12 @@ mod app {
 
         let mut tof_config = vl6180x::Config::new();
         tof_config.set_range_interrupt_mode(vl6180x::RangeInterruptMode::NewSampleReady);
-        // tof_config.set_range_inter_measurement_period(2550).unwrap();
-        // tof_config.set_range_max_convergence_time(63).unwrap();
-        // tof_config.set_range_result_scaler(3).unwrap();
+        tof_config.set_ambient_interrupt_mode(vl6180x::AmbientInterruptMode::NewSampleReady);
+        tof_config.set_ambient_analogue_gain_level(7).expect("saag");
+        tof_config.set_ambient_result_scaler(15).expect("sas");
         let vl6180x: Vl6180xType = vl6180x::VL6180X::with_config(i2c, &tof_config)
             .expect("vl")
-            .start_range_continuous_mode()
+            .start_interleaved_continuous_mode()
             .expect("ct");
 
         let tof_1: Tof1Type = vl6180x::VL6180XwPins {
@@ -91,24 +95,49 @@ mod app {
             interrupt_pin,
         };
 
-        (Shared { led, delay, tof_1 }, Local {}, init::Monotonics())
+        let counter: u32 = 0;
+
+        (Shared { led, tof_1 }, Local { counter }, init::Monotonics())
     }
 
-    #[task(binds=EXTI9_5, shared = [led, tof_1])]
+    #[task(binds=EXTI9_5, shared = [led, tof_1], local = [counter])]
     fn exti95_event(ctx: exti95_event::Context) {
         let led = ctx.shared.led;
         let tof_1 = ctx.shared.tof_1;
+        let counter = ctx.local.counter;
 
-        hprintln!("-------- Interrupt! --------").unwrap();
+        *counter += 1;
+
+        hprintln!("-------- Interrupt! -------- ({})", *counter).unwrap();
         (led, tof_1).lock(|led, tof_1| {
             led.set_low();
-            match tof_1.vl6180x.read_range_mm() {
-                Ok(range) => hprintln!("Range Read: {}mm", range).unwrap(),
-                Err(e) => hprintln!("Error {:?}", e).unwrap(),
-            };
+            match tof_1.vl6180x.read_interrupt_status() {
+                Ok(status) => {
+                    if !vl6180x::ResultInterruptStatusGpioCode::has_status(
+                        vl6180x::ResultInterruptStatusGpioCode::NoRangeEvents,
+                        status,
+                    ) {
+                        match tof_1.vl6180x.read_range_mm() {
+                            Ok(range) => hprintln!("Range Read: {}mm", range).unwrap(),
+                            Err(e) => hprintln!("Error {:?}", e).unwrap(),
+                        };
+                    }
+                    if !vl6180x::ResultInterruptStatusGpioCode::has_status(
+                        vl6180x::ResultInterruptStatusGpioCode::NoAmbientEvents,
+                        status,
+                    ) {
+                        match tof_1.vl6180x.read_ambient_lux() {
+                            Ok(lux) => hprintln!("Ambient Read: {} lux", lux).unwrap(),
+                            Err(e) => hprintln!("Error {:?}", e).unwrap(),
+                        };
+                    }
+                }
+                Err(e) => hprintln!("Error in reading interrupt status {:?}", e).unwrap(),
+            }
+
             led.set_high();
-            tof_1.vl6180x.clear_all_interrupts().expect("clrall");
             tof_1.interrupt_pin.clear_interrupt_pending_bit();
+            tof_1.vl6180x.clear_all_interrupts().expect("clrall");
         });
     }
 

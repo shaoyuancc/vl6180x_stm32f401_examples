@@ -10,7 +10,6 @@ use stm32f4xx_hal as hal;
 use hal::gpio::{Output, Pin};
 
 use panic_semihosting as _;
-// use shared_bus;
 use vl6180x;
 
 use hal::{pac, prelude::*};
@@ -47,20 +46,10 @@ fn main() -> ! {
             .set_open_drain();
         let i2c = dp.I2C1.i2c((scl, sda), 400.kHz(), &clocks);
 
-        // Set up shared I2C bus (single task/thread)
-        // let bus: &'static _ = shared_bus::new_cortexm!(I2cType = i2c).unwrap();
-
         // Set up TOF distance sensor
         let mut tof_config = vl6180x::Config::new();
-        tof_config
-            .set_ambient_analogue_gain_level(7)
-            .expect("set ambient analogue gain level");
-
-        tof_config
-            .set_ambient_result_scaler(15)
-            .expect("set ambient scaler");
-
-        // tof_config.set_i2c_address(57);
+        tof_config.set_ambient_analogue_gain_level(7).expect("saag");
+        tof_config.set_ambient_result_scaler(15).expect("sas");
 
         // To create sensor with default configuration:
         let mut tof_1 = vl6180x::VL6180X::with_config(i2c, &tof_config)
@@ -129,7 +118,7 @@ fn main() -> ! {
                         hprintln!("Error reading TOF sensor Continuous Poll! {:?}", e).unwrap()
                     }
                 },
-                RangeSinglePoll => match tof_1.try_poll_range_single_blocking_mm() {
+                RangeSinglePoll => match tof_1.try_poll_range_mm_single_blocking() {
                     Ok(range) => hprintln!("Range Single Poll: {}mm", range).unwrap(),
                     Err(e) => hprintln!("Error reading TOF sensor Single Poll! {:?}", e).unwrap(),
                 },
@@ -146,7 +135,7 @@ fn main() -> ! {
                     delay.delay_ms(500_u32);
                 }
                 AmbientSinglePoll => {
-                    match tof_1.try_poll_ambient_single_blocking() {
+                    match tof_1.try_poll_ambient_lux_single_blocking() {
                         Ok(ambient) => {
                             hprintln!("Ambient Single Poll: {:08.4}lux", ambient).unwrap()
                         }
@@ -156,7 +145,6 @@ fn main() -> ! {
                         }
                     };
                 }
-                // AddressCycle => show_text("Done Cycling\nAddresses", &mut disp),
                 _ => (),
             };
         }
@@ -171,15 +159,9 @@ const END_TEXT: &str = "Goodbye\nSee you soon!";
 enum State {
     WelcomeText,
     RangeContinuousPoll,
-    RangeContinuousHostPoll,
-    RangeContinuousInterrupt,
     RangeSinglePoll,
-    RangeSingleHostPoll,
-    RangeSingleInterrupt,
     AmbientContinuousPoll,
     AmbientSinglePoll,
-    AddressCycle,
-    WhoAmI,
     EndText,
 }
 
@@ -189,17 +171,10 @@ impl State {
         *self = match *self {
             WelcomeText => RangeContinuousPoll,
             RangeContinuousPoll => RangeSinglePoll,
-            // RangeContinuousHostPoll,
-            // RangeContinuousInterrupt,
             RangeSinglePoll => AmbientContinuousPoll,
             AmbientContinuousPoll => AmbientSinglePoll,
             AmbientSinglePoll => EndText,
-            // RangeSingleHostPoll,
-            // RangeSingleInterrupt,
-            // AddressCycle => WhoAmI,
-            // WhoAmI => EndText,
             EndText => WelcomeText,
-            _ => WelcomeText,
         }
     }
 }
